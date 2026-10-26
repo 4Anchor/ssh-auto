@@ -32,6 +32,64 @@ async def test_app_tabs_search_and_saved_candidate_filter(tmp_path: Path):
         await pilot.press("tab")
         assert app.tab == "saved"
 
+@pytest.mark.asyncio
+async def test_date_range_and_sort_on_both_tabs(tmp_path: Path):
+    from datetime import datetime, timezone
+    from textual.widgets import Input, Static
+
+    def at(day: int) -> datetime:
+        return datetime(2026, 10, day, 23, 45, tzinfo=timezone.utc)
+
+    catalog = Catalog(tmp_path / "profiles.yaml")
+    snapshot = catalog.save([
+        Profile("early", "early.example", last_used_at=at(4)),
+        Profile("late", "late.example", last_used_at=at(26)),
+        Profile("unused", "unused.example"),
+    ], None)
+    candidates = [
+        Candidate("no-date.example", (), frozenset({"bash"}), 9),
+        Candidate("old.example", (), frozenset({"fish"}), 1, at(4)),
+        Candidate("new.example", (), frozenset({"fish"}), 1, at(26)),
+    ]
+    app = SshAutoApp(catalog, snapshot, candidates, [])
+    async with app.run_test() as pilot:
+        assert [p.name for p in app._displayed] == ["late", "early", "unused"]
+        await pilot.click("#date-sort")
+        assert [p.name for p in app._displayed] == ["early", "late", "unused"]
+        app.query_one("#date-from", Input).value = "2026-10-04"
+        app.query_one("#date-to", Input).value = "2026-10-04"
+        await pilot.pause()
+        assert [p.name for p in app._displayed] == ["early"]
+        await pilot.click("#found-tab")
+        assert [c.destination for c in app._displayed] == ["old.example"]
+        app.query_one("#date-to", Input).value = "2026-10-26"
+        await pilot.pause()
+        assert [c.destination for c in app._displayed] == ["old.example", "new.example"]
+        await pilot.click("#date-sort")
+        assert [c.destination for c in app._displayed] == ["new.example", "old.example"]
+        app.query_one("#search", Input).value = "old"
+        await pilot.pause()
+        assert [c.destination for c in app._displayed] == ["old.example"]
+        app.query_one("#search", Input).value = ""
+        app.query_one("#date-from", Input).value = "2026-10-27"
+        await pilot.pause()
+        assert app._displayed == []
+        assert "Неверный диапазон" in str(app.query_one("#date-error", Static).render())
+        app.query_one("#date-from", Input).value = "20261004"
+        await pilot.pause()
+        assert app._displayed == []
+        assert "ГГГГ-ММ-ДД" in str(app.query_one("#date-error", Static).render())
+        app.query_one("#date-from", Input).value = ""
+        await pilot.pause()
+        assert [c.destination for c in app._displayed] == ["new.example", "old.example"]
+        app.query_one("#date-from", Input).value = "2026-10-26"
+        app.query_one("#date-to", Input).value = ""
+        await pilot.pause()
+        assert [c.destination for c in app._displayed] == ["new.example"]
+        app.query_one("#date-from", Input).value = ""
+        await pilot.pause()
+        assert [c.destination for c in app._displayed] == ["new.example", "old.example", "no-date.example"]
+
 
 @pytest.mark.asyncio
 async def test_app_add_and_delete_workflow(tmp_path: Path):

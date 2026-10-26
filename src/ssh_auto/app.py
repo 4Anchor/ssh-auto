@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import shlex
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from rich.text import Text
 
@@ -82,7 +82,7 @@ class HelpModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         yield Container(
             Label("Клавиши"),
-            Static("a добавить · s сохранить найденное · e редактировать · d удалить\nEnter запустить · r обновить · Tab вкладка · / поиск · q выход"),
+            Static("a добавить · s сохранить найденное · e редактировать · d удалить\nEnter запустить · r обновить · Tab вкладка · / поиск · q выход\nДаты: с/по ГГГГ-ММ-ДД · кнопка сортировки: новые/старые"),
             Button("Закрыть", id="close"),
             id="help-dialog",
         )
@@ -96,6 +96,10 @@ class SshAutoApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #search { margin: 0 1; }
+    #date-controls { height: 3; margin: 0 1; }
+    #date-controls Input { width: 20; }
+    #date-controls Button { min-width: 24; }
+    #date-error { height: auto; margin: 0 1; color: $error; }
     #tabs { height: 3; align: center middle; }
     #tabs Button { margin: 0 1; }
     #content { height: 1fr; margin: 0 1; }
@@ -129,11 +133,21 @@ class SshAutoApp(App[None]):
         self.catalog_error = catalog_error
         self.tab = "saved" if self.profiles else "found"
         self.search_text = ""
+        self.date_from = ""
+        self.date_to = ""
+        self.newest_first = True
         self._displayed: list[Profile | Candidate] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield SearchInput(placeholder="Поиск по отображаемым полям", id="search")
+        yield Horizontal(
+            SearchInput(placeholder="С даты ГГГГ-ММ-ДД", id="date-from"),
+            SearchInput(placeholder="По дату ГГГГ-ММ-ДД", id="date-to"),
+            Button("Сначала новые", id="date-sort"),
+            id="date-controls",
+        )
+        yield Static("", id="date-error", markup=False)
         yield Horizontal(Button("Сохранённые", id="saved-tab"), Button("Найденные", id="found-tab"), id="tabs")
         yield DataTable(id="table", cursor_type="row")
         yield Static("", id="empty", markup=False)
@@ -162,25 +176,53 @@ class SshAutoApp(App[None]):
         table.clear()
         self._displayed = []
         needle = self.search_text.casefold()
+        try:
+            start = date.fromisoformat(self.date_from) if self.date_from else None
+            end = date.fromisoformat(self.date_to) if self.date_to else None
+            if (start and start.isoformat() != self.date_from) or (end and end.isoformat() != self.date_to):
+                raise ValueError("неверный формат")
+            if start and end and start > end:
+                raise ValueError("начало позже конца")
+        except ValueError:
+            self.query_one("#date-error", Static).update("Неверный диапазон дат: используйте ГГГГ-ММ-ДД, начало не позже конца.")
+            dates_valid = False
+            start = end = None
+        else:
+            self.query_one("#date-error", Static).update("")
+            dates_valid = True
+        def matches_date(used: datetime | None) -> bool:
+            return dates_valid and (not (start or end) or used is not None and
+                                    (start is None or used.date() >= start) and
+                                    (end is None or used.date() <= end))
+
         saved_keys = {(item.destination, item.options) for item in self.profiles}
         if self.tab == "saved":
-            values: list[Profile | Candidate] = sorted(self.profiles, key=lambda p: (-(p.last_used_at.timestamp() if p.last_used_at else float("-inf")), p.name.casefold()))
+            values = sorted(self.profiles, key=lambda p: (*_date_order(p.last_used_at, self.newest_first), p.name.casefold()))
             for profile in values:
+                used = profile.last_used_at
+                if not matches_date(used):
+                    continue
                 options = shlex.join(profile.options)
-                fields = (profile.name, profile.destination, options, profile.last_used_at.isoformat() if profile.last_used_at else "")
+                fields = (profile.name, profile.destination, options, used.isoformat() if used else "")
                 if needle and not any(needle in field.casefold() for field in fields):
                     continue
-                table.add_row(*(Text(value, end="") for value in (f"{profile.name} — {profile.destination}", options, "", "", _date(profile.last_used_at))))
+                table.add_row(*(Text(value, end="") for value in (f"{profile.name} — {profile.destination}", options, "", "", _date(used))))
                 self._displayed.append(profile)
         else:
-            values = [candidate for candidate in self.candidates if (candidate.destination, candidate.options) not in saved_keys]
+            values = sorted(
+                (candidate for candidate in self.candidates if (candidate.destination, candidate.options) not in saved_keys),
+                key=lambda c: (*_date_order(c.last_seen_at, self.newest_first), c.destination, c.options),
+            )
             for candidate in values:
+                used = candidate.last_seen_at
+                if not matches_date(used):
+                    continue
                 options = shlex.join(candidate.options)
                 sources = ",".join(sorted(candidate.sources))
-                fields = (candidate.destination, options, sources, str(candidate.use_count), candidate.last_seen_at.isoformat() if candidate.last_seen_at else "")
+                fields = (candidate.destination, options, sources, str(candidate.use_count), used.isoformat() if used else "")
                 if needle and not any(needle in field.casefold() for field in fields):
                     continue
-                table.add_row(*(Text(value, end="") for value in (candidate.destination, options, sources, str(candidate.use_count), _date(candidate.last_seen_at))))
+                table.add_row(*(Text(value, end="") for value in (candidate.destination, options, sources, str(candidate.use_count), _date(used))))
                 self._displayed.append(candidate)
         self.query_one("#empty", Static).update(
             ("Нет сохранённых профилей. Нажмите a для добавления или r для обновления истории."
@@ -214,10 +256,16 @@ class SshAutoApp(App[None]):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search":
             self.search_text = event.value
-            self._render()
+        elif event.input.id == "date-from":
+            self.date_from = event.value.strip()
+        elif event.input.id == "date-to":
+            self.date_to = event.value.strip()
+        else:
+            return
+        self._render()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "search":
+        if event.input.id in {"search", "date-from", "date-to"}:
             self.query_one("#table", DataTable).focus()
 
     def action_toggle_tab(self) -> None:
@@ -237,6 +285,10 @@ class SshAutoApp(App[None]):
             self._render()
         elif event.button.id == "found-tab":
             self.tab = "found"
+            self._render()
+        elif event.button.id == "date-sort":
+            self.newest_first = not self.newest_first
+            event.button.label = "Сначала новые" if self.newest_first else "Сначала старые"
             self._render()
 
     def action_add(self) -> None:
@@ -338,3 +390,7 @@ class SshAutoApp(App[None]):
 
 def _date(value: datetime | None) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z") if value else "—"
+
+
+def _date_order(value: datetime | None, newest_first: bool) -> tuple[bool, float]:
+    return (value is None, (-1 if newest_first else 1) * value.timestamp() if value else 0)

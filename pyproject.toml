@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.25,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ssh-auto"
+version = "0.1.0"
+description = "Interactive catalog and launcher for saved SSH profiles"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "textual>=8.2,<9",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.24,<1",
+]
+
+[project.scripts]
+ssh-auto = "ssh_auto.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ssh_auto"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
